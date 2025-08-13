@@ -1,517 +1,379 @@
-from pypokerengine.api.emulator import Emulator
-from pypokerengine.engine.data_encoder import DataEncoder
+from pypokerengine.engine.dealer import Dealer
+from pypokerengine.engine.table import Table
+from pypokerengine.engine.player import Player
+from pypokerengine.engine.round_manager import RoundManager
+from pypokerengine.engine.poker_constants import PokerConstants as Const
 from .models import SetupPlayer
 import random
 
-# Poker Game Constants
-SMALL_BLIND_AMOUNT = 1
-BIG_BLIND_AMOUNT = 2
-MIN_PLAYERS = 2
-MAX_PLAYERS = 10
-MIN_RAISE_AMOUNT = 1  # Minimum raise above current bet
-
-# Player Position Constants
-DEALER_POSITION = 0
-SMALL_BLIND_POSITION = 1
-BIG_BLIND_POSITION = 2
-
-# Street Constants (PyPokerEngine values)
-STREET_PREFLOP = 0
-STREET_FLOP = 1
-STREET_TURN = 2
-STREET_RIVER = 3
-STREET_SHOWDOWN = 4
-STREET_FINISHED = 5
-
-# Game Flow Constants
-FIRST_PLAYER_INDEX = 0
-
 class GameEngineService:
     def __init__(self):
-        self.games = {}  # game_id → { engine, players, status }
+        self.games = {}  # game_id → { dealer, table, players, status, round_state, current_state }
 
     def start_game(self, game_id, players):
-        if len(players) < MIN_PLAYERS:
-            return {"error": f"At least {MIN_PLAYERS} players required."}
-        if len(players) > MAX_PLAYERS:
-            return {"error": f"Maximum {MAX_PLAYERS} players allowed."}
+        if len(players) < 2:
+            return {"error": "At least 2 players required."}
 
-        random.shuffle(players)
-
-        # Create emulator and set game rules
-        emulator = Emulator()
-        emulator.set_game_rule(
-            player_num=len(players),
-            max_round=10,
-            small_blind_amount=SMALL_BLIND_AMOUNT,
-            ante_amount=0
+        # Create dealer with proper configuration
+        dealer = Dealer(
+            small_blind_amount=1,
+            initial_stack=max(p["stack"] for p in players),
+            ante=0
         )
 
-        # Set blind structure to match our game rules
-        emulator.set_blind_structure({})
-
-        player_objs = []
-        players_info = {}
-
+        # Register players with the dealer
         for p in players:
             player = SetupPlayer(user_id=p["user_id"], stack=p["stack"])
-            emulator.register_player(p["user_id"], player)
-            player_objs.append(player)
-            players_info[p["user_id"]] = {"stack": p["stack"], "name": p["user_id"]}
+            dealer.register_player(p["user_id"], player)
 
-                # Generate initial game state
-        game_state = emulator.generate_initial_game_state(players_info)
+        # Get the table from dealer
+        table = dealer.table
 
-        # We need to start the round to get hole cards, but handle it carefully
-        # Start the round but don't process actions yet
-        game_state, events = emulator.start_new_round(game_state)
+        # Set blind positions
+        try:
+            # No need to calculate blind positions since we're handling them manually
+            pass
+        except Exception as e:
+            return {"error": f"Failed to set up game: {str(e)}"}
 
-        # Assign positions based on shuffled player order
-        dealer_index = 0
-        sb_index = 1 % len(player_objs)
-        bb_index = 2 % len(player_objs)
+        # Get dealer index for blind collection and position assignment
+        dealer_index = table.dealer_btn
 
-        for i, p in enumerate(player_objs):
-            if i == dealer_index:
-                p.position = DEALER_POSITION  # dealer - acts first after blinds
-                print(f"DEBUG: Set {p.user_id} position to {DEALER_POSITION} (dealer)")
-            elif i == sb_index:
-                p.position = SMALL_BLIND_POSITION  # small blind - acts second
-                print(f"DEBUG: Set {p.user_id} position to {SMALL_BLIND_POSITION} (small blind)")
-            elif i == bb_index:
-                p.position = BIG_BLIND_POSITION  # big blind - acts third
-                print(f"DEBUG: Set {p.user_id} position to {BIG_BLIND_POSITION} (big blind)")
-            else:
-                p.position = i  # subsequent players in order (0-indexed)
-                print(f"DEBUG: Set {p.user_id} position to {i}")
+        # Manually deal cards and set up game state
+        try:
+            # Shuffle the deck
+            table.deck.shuffle()
 
-        # Update hole cards and stacks from the table's Player objects
-        table = game_state["table"]
-        for i, player in enumerate(player_objs):
-            table_player = table.seats.players[i]
-            player.hole_card = [str(card) for card in table_player.hole_card]
-            # Update stack to reflect blinds posted
-            player.stack = table_player.stack
+            # Deal hole cards to each player
+            for player in table.seats.players:
+                hole_cards = table.deck.draw_cards(2)
+                player.add_holecard(hole_cards)
 
-        # Calculate pot contributions from the blinds posted
-        pot_contributions = []
-        for i, player in enumerate(table.seats.players):
-            # Include ALL players with their current contributions (including 0)
-            pot_contributions.append({
-                "user_id": player_objs[i].user_id,
-                "amount": player.pay_info.amount
-            })
+            # Collect blinds - use dealer_index directly for consistency
+            small_blind_player = table.seats.players[dealer_index]  # Dealer is small blind
+            big_blind_player = table.seats.players[(dealer_index + 1) % 2]  # Other player is big blind
 
-        # Calculate total pot amount
-        total_pot = sum(contribution["amount"] for contribution in pot_contributions)
+            # Small blind
+            sb_amount = 1
+            small_blind_player.collect_bet(sb_amount)
+            small_blind_player.add_action_history(Const.Action.SMALL_BLIND, sb_amount=sb_amount)
+            small_blind_player.pay_info.update_by_pay(sb_amount)
+            print(f"DEBUG: Small blind collected {sb_amount}, pay_info.amount now: {small_blind_player.pay_info.amount}")
 
-        self.games[game_id] = {
-            "emulator": emulator,
-            "game_state": game_state,
-            "players": player_objs,
-            "status": "in_progress",
-            "pot_contributions": pot_contributions  # Track individual pot contributions
+            # Big blind
+            bb_amount = sb_amount * 2
+            big_blind_player.collect_bet(bb_amount)
+            big_blind_player.add_action_history(Const.Action.BIG_BLIND, sb_amount=bb_amount)
+            big_blind_player.pay_info.update_by_pay(bb_amount)
+            print(f"DEBUG: Big blind collected {bb_amount}, pay_info.amount now: {big_blind_player.pay_info.amount}")
+
+        except Exception as e:
+            return {"error": f"Failed to deal cards and collect blinds: {str(e)}"}
+
+                        # Assign positions based on dealer button
+        # dealer_index is already defined above in the blind collection section
+
+        # Update player positions - we'll handle this in the heads-up logic below
+        # for i, player in enumerate(table.seats.players):
+        #     if i == dealer_index:
+        #         player.position = "dealer"
+        #     elif i == sb_pos:
+        #         player.position = "small_blind"
+        #     elif i == bb_pos:
+        #         player.position = "big_blind"
+        #     else:
+        #         player.position = "none"
+
+        # In heads-up play, dealer is also small blind
+        if len(table.seats.players) == 2:
+            # Clear all positions first
+            for player in table.seats.players:
+                player.position = "none"
+
+            # Assign correct positions for heads-up (0 and 1, not 1 and 2)
+            table.seats.players[dealer_index].position = "small_blind"
+            table.seats.players[(dealer_index + 1) % 2].position = "big_blind"
+
+            # Debug final state
+            print(f"DEBUG: Final positions and amounts:")
+            for i, p in enumerate(table.seats.players):
+                print(f"  Player {i}: position={p.position}, pay_info.amount={p.pay_info.amount}, stack={p.stack}")
+
+        # Create a simple game state
+        current_state = {
+            "round_count": 1,
+            "small_blind_amount": 1,
+            "street": Const.Street.PREFLOP,
+            "next_player": dealer_index,  # In heads-up preflop, small blind (dealer) acts first
+            "players_acted": set(),  # Track which players have acted this street
+            "table": table
         }
 
-        # Debug: Print final positions before returning
-        print("DEBUG: Final positions before return:")
-        for p in player_objs:
-            print(f"  {p.user_id}: position={p.position} (type: {type(p.position)})")
+        # Store game state
+        self.games[game_id] = {
+            "dealer": dealer,
+            "table": table,
+            "players": table.seats.players,
+            "status": "in_progress",
+            "current_state": current_state,
+            "messages": []
+        }
 
-        # Calculate the current bet amount and what each player needs to call
-        current_bet = max(contribution["amount"] for contribution in pot_contributions) if pot_contributions else 0
-
-        # Generate valid actions for the dealer (position 0)
-        dealer_id = player_objs[0].user_id  # Dealer is always at position 0
-        dealer_contribution = next((cont["amount"] for cont in pot_contributions if cont["user_id"] == dealer_id), 0)
-
-        raw_actions = emulator.generate_possible_actions(game_state)
-        valid_actions = []
-
-        for action in raw_actions:
-            if action["action"] == "fold":
-                # Fold always costs 0
-                valid_actions.append({"action": "fold", "amount": 0})
-            elif action["action"] == "call":
-                # Calculate the actual amount the dealer needs to put in from their stack
-                call_amount = current_bet - dealer_contribution
-                if call_amount == 0:
-                    # No more money needed = check
-                    valid_actions.append({"action": "check", "amount": 0})
-                else:
-                    # More money needed = call
-                    valid_actions.append({"action": "call", "amount": call_amount})
-            elif action["action"] == "raise":
-                # Keep the raise action as is (frontend needs to specify amount)
-                valid_actions.append(action)
+        # Get current round state
+        round_state = self._get_current_round_state(dealer, table, current_state)
 
         return {
             "game_id": game_id,
             "players": [
                 {
-                    "user_id": p.user_id,
+                    "user_id": p.name,  # Using name as user_id
                     "hole_cards": p.hole_card,
-                    "position": p.position,
+                    "position": getattr(p, 'position', 'none'),
                     "stack": p.stack
-                } for p in player_objs
+                } for p in table.seats.players
             ],
-            "pot": pot_contributions,
-            "total_pot": total_pot,
-            "min_bet": BIG_BLIND_AMOUNT,  # Big blind amount (minimum bet for the game)
-            "next_player": dealer_id,  # Dealer goes first
-            "valid_actions": valid_actions
+            "round_state": round_state
         }
+
+    def _get_current_round_state(self, dealer, table, state=None):
+        """Extract current round state from dealer and table"""
+        if state is None:
+            state = {}
+
+        return {
+            "dealer_btn": table.dealer_btn,
+            "sb_pos": 0,  # Hardcoded for heads-up - dealer is small blind
+            "bb_pos": 1,  # Hardcoded for heads-up - other player is big blind
+            "community_cards": table.get_community_card(),
+            "pot": self._calculate_pot(table),
+            "street": state.get("street", 0),
+            "next_player": state.get("next_player", 0),
+            "players": [
+                {
+                    "uuid": p.uuid,
+                    "name": p.name,
+                    "stack": p.stack,
+                    "hole_cards": p.hole_card,
+                    "is_active": p.is_active(),
+                    "position": getattr(p, 'position', 'none')
+                } for p in table.seats.players
+            ]
+        }
+
+    def _calculate_pot(self, table):
+        """Calculate total pot from all players"""
+        total_pot = 0
+        for player in table.seats.players:
+            # This is simplified - you'd need to track actual bets
+            pass
+        return total_pot
 
     def apply_action(self, game_id, user_id, action, amount):
         game = self.games.get(game_id)
         if not game:
             return {"error": "Game not found"}
 
-        emulator = game["emulator"]
-        game_state = game["game_state"]
+        dealer = game["dealer"]
+        table = game["table"]
+        current_state = game["current_state"]
 
+        # Find the player by user_id
+        player = None
+        for p in table.seats.players:
+            if p.name == user_id:
+                player = p
+                break
+
+        if not player:
+            return {"error": "Player not found"}
+
+        # Check if it's this player's turn
+        if current_state["next_player"] != table.seats.players.index(player):
+            return {"error": "Not your turn"}
+
+        # Apply the action manually instead of using RoundManager
         try:
-            print(f"DEBUG: Processing action for user {user_id}, action {action}, amount {amount}")
-            print(f"DEBUG: Current street: {game_state.get('street')}, next_player: {game_state.get('next_player')}")
-
-            # Validate action requirements
-            if action == "raise" and amount <= 0:
-                return {"error": "Raise action requires a positive amount"}
-            elif action in ["fold", "call"] and amount != 0:
-                print(f"DEBUG: Ignoring amount {amount} for {action} action - using calculated amount")
-
-            # Get player objects for reference
-            player_objs = game["players"]
-
-            # If this is the first action, start the round first
-            if game_state.get("next_player") is None:
-                print(f"DEBUG: Starting first round for game {game_id}")
-                game_state, events = emulator.start_new_round(game_state)
-                # Update the game state
-                game["game_state"] = game_state
-
-                        # Now apply the action
-            print(f"DEBUG: About to apply action: {action} with amount: {amount}")
-            print(f"DEBUG: Current pot before action: {[p.pay_info.amount for p in game_state['table'].seats.players]}")
-
-                        # For raise and call actions, we need to calculate the total bet amount
-            if action in ["raise", "call"]:
-                # Find the current player's current contribution
-                current_player_contribution = 0
-                for i, player in enumerate(game_state["table"].seats.players):
-                    if player_objs[i].user_id == user_id:
-                        current_player_contribution = player.pay_info.amount
-                        break
-
-                if action == "raise":
-                    # Calculate total bet amount (current contribution + raise amount)
-                    total_bet_amount = current_player_contribution + amount
-                    print(f"DEBUG: Raise calculation - current contribution: {current_player_contribution}, raise by: {amount}, total bet: {total_bet_amount}")
-                else:  # call
-                    # Calculate total bet amount needed to call
-                    current_bet = max(p.pay_info.amount for p in game_state["table"].seats.players)
-                    total_bet_amount = current_bet
-                    print(f"DEBUG: Call calculation - current contribution: {current_player_contribution}, current bet: {current_bet}, total bet: {total_bet_amount}")
-
-                # Apply the action with the total bet amount
-                updated_state, events = emulator.apply_action(game_state, action, total_bet_amount)
+            # Process the action based on type
+            if action == "fold":
+                player.pay_info.update_to_fold()
+                player.add_action_history(Const.Action.FOLD)
+            elif action == "call":
+                # Calculate call amount (simplified)
+                call_amount = self._calculate_call_amount(table, player)
+                if call_amount > 0:
+                    player.collect_bet(call_amount)
+                    player.add_action_history(Const.Action.CALL, call_amount)
+                    player.pay_info.update_by_pay(call_amount)
+            elif action == "check":
+                # Check is valid when player doesn't need to put in more chips
+                call_amount = self._calculate_call_amount(table, player)
+                print(f"DEBUG: Player {player.name} checking, call_amount needed: {call_amount}")
+                if call_amount > 0:
+                    return {"error": f"Cannot check - need to call {call_amount} chips"}
+                # Check is equivalent to calling with 0 amount
+                player.add_action_history(Const.Action.CALL, 0)
+                print(f"DEBUG: Check action recorded for {player.name}")
+            elif action == "raise":
+                if amount <= 0:
+                    return {"error": "Raise amount must be positive"}
+                player.collect_bet(amount)
+                player.add_action_history(Const.Action.RAISE, amount)
+                player.pay_info.update_by_pay(amount)
             else:
-                # For fold, use the amount as is
-                updated_state, events = emulator.apply_action(game_state, action, amount)
+                return {"error": f"Unknown action: {action}"}
 
-            print(f"DEBUG: Action applied, new street: {updated_state.get('street')}, next_player: {updated_state.get('next_player')}")
-            print(f"DEBUG: Pot after action: {[p.pay_info.amount for p in updated_state['table'].seats.players]}")
-            print(f"DEBUG: Events from emulator: {events}")
+            # Track that this player has acted
+            current_state["players_acted"].add(table.seats.players.index(player))
 
-            # If the street is FINISHED, we need to continue to the next street
-            if updated_state.get("street") == STREET_FINISHED:  # FINISHED
-                print(f"DEBUG: Street is FINISHED, advancing to next street")
-                # This means the betting round is complete, move to next street
-                # We'll handle this by updating the state manually
-                current_street = game_state.get("street", 0)
-                next_street = current_street + 1
+            # Move to next player
+            next_player_pos = self._get_next_active_player(table, current_state["next_player"])
+            current_state["next_player"] = next_player_pos
+            print(f"DEBUG: After action '{action}', next_player_pos: {next_player_pos}, player name: {table.seats.players[next_player_pos].name}")
+            print(f"DEBUG: Players acted this street: {current_state['players_acted']}")
 
-                # PyPokerEngine streets: 0=preflop, 1=flop, 2=turn, 3=river, 4=showdown, 5=finished
-                # If we're going beyond river (street 3), we should go to showdown (street 4)
-                if next_street > STREET_RIVER:
-                    next_street = STREET_SHOWDOWN  # showdown
+            # Check if current street is complete (all players have matched bets)
+            street_complete = self._is_street_complete(table, current_state)
+            print(f"DEBUG: Street complete check: {street_complete}")
+            if street_complete:
+                print(f"DEBUG: All players have matched bets, advancing street")
 
-                updated_state["street"] = next_street
-                updated_state["next_player"] = FIRST_PLAYER_INDEX  # Start with first player for next street
+            # If street is complete, automatically advance to next street
+            street_advanced = False
+            if street_complete:
+                street_advanced = self._advance_street_automatically(current_state, table)
 
-                print(f"DEBUG: Street advanced from {current_street} to {next_street}")
+            # Update game state
+            game["current_state"] = current_state
 
-                # CRITICAL: Preserve the pot information - don't let it reset
-                # Calculate current pot before PyPokerEngine resets it
-                table = game_state["table"]
+            # Update round state
+            round_state = self._get_current_round_state(dealer, table, current_state)
 
-                # Track individual player contributions to the pot
-                pot_contributions = []
-                for i, player in enumerate(table.seats.players):
-                    # Include ALL players with their current contributions (including 0)
-                    pot_contributions.append({
-                        "user_id": player_objs[i].user_id,
-                        "amount": player.pay_info.amount
-                    })
+            return {
+                "success": True,
+                "round_state": round_state,
+                "action_applied": action,
+                "next_player": next_player_pos,
+                "street_complete": street_complete,
+                "street_advanced": street_advanced,
+                "current_street": current_state["street"]
+            }
 
-                # Store the pot contributions in the updated state
-                updated_state["pot_contributions"] = pot_contributions
-
-                # Calculate total pot amount
-                current_pot_amount = sum(contribution["amount"] for contribution in pot_contributions)
-
-                print(f"DEBUG: Preserving pot contributions: {pot_contributions}")
-                print(f"DEBUG: Total pot amount: {current_pot_amount} when advancing from street {game_state.get('street')} to {updated_state['street']}")
-
-                # Also store the pot contributions in our game tracking
-                if "pot_contributions" not in game:
-                    game["pot_contributions"] = []
-                game["pot_contributions"].extend(pot_contributions)
-                print(f"DEBUG: Accumulated pot contributions: {game['pot_contributions']}")
-
-            # Update the game state
-            game["game_state"] = updated_state
         except Exception as e:
             return {"error": f"Invalid action: {str(e)}"}
 
-        # Extract information from the updated game state
-        table = updated_state["table"]
+    def _is_street_complete(self, table, current_state):
+        """Check if all active players have acted AND put in equal amounts for current street"""
+        active_players = [p for p in table.seats.players if p.is_active()]
 
-        # CRITICAL: Extract updated pot information from the new game state
-        # The emulator.apply_action() should have updated the player pay_info amounts
-        updated_table = updated_state["table"]
-        pot_contributions = []
+        if len(active_players) <= 1:
+            return True  # Only one player left, street is complete
 
-        # Get the updated player objects from the game to match user_ids
-        for i, player in enumerate(updated_table.seats.players):
-            # Include ALL players with their current contributions (including 0)
-            pot_contributions.append({
-                "user_id": player_objs[i].user_id,
-                "amount": player.pay_info.amount
-            })
+        # Check if all active players have acted this street
+        active_player_indices = {i for i, p in enumerate(table.seats.players) if p.is_active()}
+        if not active_player_indices.issubset(current_state.get("players_acted", set())):
+            print(f"DEBUG: Not all players have acted. Active: {active_player_indices}, Acted: {current_state.get('players_acted', set())}")
+            return False  # Not all players have acted
 
-        print(f"DEBUG: Updated pot contributions from emulator: {pot_contributions}")
+        # Get the highest bet amount for this street
+        max_bet = max(p.pay_info.amount for p in active_players)
 
-        # Update our game tracking with the new pot contributions
-        game["pot_contributions"] = pot_contributions
+        # Check if all active players have matched
+        for player in active_players:
+            if player.pay_info.amount < max_bet:
+                print(f"DEBUG: Player {player.name} has {player.pay_info.amount} chips, needs {max_bet}")
+                return False  # Someone is behind
 
-        # Calculate the current bet amount and what each player needs to call
-        current_bet = max(contribution["amount"] for contribution in pot_contributions) if pot_contributions else 0
-        print(f"DEBUG: Current bet amount: {current_bet}")
+        print(f"DEBUG: Street complete - all players acted and matched bets")
+        return True  # All players have acted AND matched
 
-        # Get the next player's user_id instead of just the index
-        next_player_index = updated_state.get("next_player")
-        next_player_id = None
+    def _advance_street_automatically(self, current_state, table):
+        """Automatically advance to the next street when betting is complete"""
+        current_street = current_state["street"]
 
-        # Debug logging and safety check
-        print(f"DEBUG: next_player_index={next_player_index}, player_objs length={len(player_objs)}")
-        print(f"DEBUG: Player objects: {[p.user_id for p in player_objs]}")
+        try:
+            if current_street == Const.Street.PREFLOP:
+                # Deal flop (3 community cards)
+                for _ in range(3):
+                    card = table.deck.draw_card()
+                    table.add_community_card(card)
+                current_state["street"] = Const.Street.FLOP
+                current_state["next_player"] = (table.dealer_btn + 1) % 2  # Big blind acts first postflop
+                current_state["players_acted"] = set()  # Reset for new street
 
-        if next_player_index is not None and 0 <= next_player_index < len(player_objs):
-            next_player_id = player_objs[next_player_index].user_id
-            print(f"DEBUG: Successfully got next_player_id: {next_player_id}")
-        else:
-            print(f"WARNING: Invalid next_player_index: {next_player_index}")
-            # If the index is invalid, try to find the next active player
-            for i, player in enumerate(player_objs):
-                print(f"DEBUG: Checking player {i}: {player.user_id}, stack: {player.stack}")
-                if player.stack > 0:  # Find first player with chips
-                    next_player_id = player.user_id
-                    print(f"DEBUG: Found active player: {next_player_id}")
-                    break
+            elif current_street == Const.Street.FLOP:
+                # Deal turn (1 community card)
+                card = table.deck.draw_card()
+                table.add_community_card(card)
+                current_state["street"] = Const.Street.TURN
+                current_state["next_player"] = (table.dealer_btn + 1) % 2  # Big blind acts first postflop
+                current_state["players_acted"] = set()  # Reset for new street
+
+            elif current_street == Const.Street.TURN:
+                # Deal river (1 community card)
+                card = table.deck.draw_card()
+                table.add_community_card(card)
+                current_state["street"] = Const.Street.RIVER
+                current_state["next_player"] = (table.dealer_btn + 1) % 2  # Big blind acts first postflop
+                current_state["players_acted"] = set()  # Reset for new street
+
+            elif current_street == Const.Street.RIVER:
+                # Move to showdown
+                current_state["street"] = Const.Street.SHOWDOWN
+                current_state["next_player"] = (table.dealer_btn + 1) % 2  # Big blind acts first postflop
+                current_state["players_acted"] = set()  # Reset for new street
+
             else:
-                print(f"WARNING: No active players found!")
-                next_player_id = None
+                return False  # Already at final street
 
-        # Calculate total pot amount
-        total_pot = sum(contribution["amount"] for contribution in pot_contributions)
+            return True  # Street was advanced
 
-        # Generate valid actions with correct amounts
-        raw_actions = emulator.generate_possible_actions(updated_state)
-        valid_actions = []
+        except Exception as e:
+            print(f"Error advancing street: {e}")
+            return False
 
-        for action in raw_actions:
-            if action["action"] == "fold":
-                # Fold always costs 0
-                valid_actions.append({"action": "fold", "amount": 0})
-            elif action["action"] == "call":
-                # Calculate the actual amount the player needs to put in from their stack
-                player_contribution = next((cont["amount"] for cont in pot_contributions if cont["user_id"] == next_player_id), 0)
-                call_amount = current_bet - player_contribution
-                if call_amount == 0:
-                    # No more money needed = check
-                    valid_actions.append({"action": "check", "amount": 0})
-                else:
-                    # More money needed = call
-                    valid_actions.append({"action": "call", "amount": call_amount})
-            elif action["action"] == "raise":
-                # Keep the raise action as is (frontend needs to specify amount)
-                valid_actions.append(action)
 
-        print(f"DEBUG: Generated valid actions: {valid_actions}")
 
-        return {
-            "next_player": next_player_id,
-            "valid_actions": valid_actions,
-            "board": [str(card) for card in table.get_community_card()],
-            "pot": pot_contributions,
-            "total_pot": total_pot,
-            "street": updated_state.get("street"),
-            "round_count": updated_state.get("round_count")
-        }
+    def _calculate_call_amount(self, table, player):
+        """Calculate how much the player needs to call"""
+        # Find the highest bet amount among all active players
+        active_players = [p for p in table.seats.players if p.is_active()]
+        if not active_players:
+            return 0
+
+        max_bet = max(p.pay_info.amount for p in active_players)
+
+        # Calculate how much this player needs to call
+        player_contribution = player.pay_info.amount
+        call_amount = max_bet - player_contribution
+
+        return max(0, call_amount)  # Can't call negative amounts
+
+    def _get_next_active_player(self, table, current_pos):
+        """Get the next active player position"""
+        players = table.seats.players
+        next_pos = (current_pos + 1) % len(players)
+
+        # Find next active player
+        for _ in range(len(players)):
+            if players[next_pos].is_active() and players[next_pos].stack > 0:
+                return next_pos
+            next_pos = (next_pos + 1) % len(players)
+
+        return current_pos  # If no one else is active
+
+
 
     def get_state(self, game_id):
         game = self.games.get(game_id)
         if not game:
             return {"error": "Game not found"}
 
-        emulator = game["emulator"]
-        game_state = game["game_state"]
-        player_objs = game["players"]  # Get player objects from stored game data
+        dealer = game["dealer"]
+        table = game["table"]
+        current_state = game.get("current_state", {})
 
-        # If the round hasn't started yet, return initial state
-        if game_state.get("next_player") is None:
-            return {
-                "next_player": None,
-                "valid_actions": [],
-                "board": [],
-                "pot": [],
-                "total_pot": 0,
-                "street": STREET_PREFLOP,  # preflop
-                "round_count": 0,
-                "message": "Round not started yet. Make first action to begin."
-            }
-
-        # If we're waiting for the first action, return the initial round state
-        if game_state.get("street") == STREET_PREFLOP and game_state.get("pot", {}).get("main", {}).get("amount", 0) == 0:
-            # This is the initial state after starting the round but before first action
-            table = game_state["table"]
-
-            # Calculate pot contributions from player pay info
-            pot_contributions = []
-            for i, player in enumerate(table.seats.players):
-                # Include ALL players with their current contributions (including 0)
-                pot_contributions.append({
-                    "user_id": player_objs[i].user_id,
-                    "amount": player.pay_info.amount
-                })
-
-            # Calculate total pot amount
-            total_pot = sum(contribution["amount"] for contribution in pot_contributions)
-
-            # Calculate the current bet amount and what each player needs to call
-            current_bet = max(contribution["amount"] for contribution in pot_contributions) if pot_contributions else 0
-
-            # Generate valid actions with correct amounts
-            raw_actions = emulator.generate_possible_actions(game_state)
-            valid_actions = []
-
-            for action in raw_actions:
-                if action["action"] == "fold":
-                    # Fold always costs 0
-                    valid_actions.append({"action": "fold", "amount": 0})
-                elif action["action"] == "call":
-                    # Calculate the actual amount the player needs to put in from their stack
-                    player_contribution = next((cont["amount"] for cont in pot_contributions if cont["user_id"] == player_objs[0].user_id), 0)
-                    call_amount = current_bet - player_contribution
-                    if call_amount == 0:
-                        # No more money needed = check
-                        valid_actions.append({"action": "check", "amount": 0})
-                    else:
-                        # More money needed = call
-                        valid_actions.append({"action": "call", "amount": call_amount})
-                elif action["action"] == "raise":
-                    # Keep the raise action as is (frontend needs to specify amount)
-                    valid_actions.append(action)
-
-            return {
-                "next_player": player_objs[0].user_id,  # First player to act
-                "valid_actions": valid_actions,
-                "board": [],
-                "pot": pot_contributions,  # Use calculated pot contributions
-                "total_pot": total_pot,
-                "street": STREET_PREFLOP,  # preflop
-                "round_count": 1,
-                "message": "Round started. Waiting for first action."
-            }
-
-        table = game_state["table"]
-
-        # Extract current pot information from the game state
-        pot_contributions = []
-        for i, player in enumerate(table.seats.players):
-            # Include ALL players with their current contributions (including 0)
-            pot_contributions.append({
-                "user_id": player_objs[i].user_id,
-                "amount": player.pay_info.amount
-            })
-
-        print(f"DEBUG: Current pot contributions from game state: {pot_contributions}")
-
-        # Calculate the current bet amount and what each player needs to call
-        current_bet = max(contribution["amount"] for contribution in pot_contributions) if pot_contributions else 0
-        print(f"DEBUG: Current bet amount: {current_bet}")
-
-        # Get the next player's user_id instead of just the index
-        next_player_index = game_state.get("next_player")
-        next_player_id = None
-
-        # Debug logging and safety check
-        print(f"DEBUG: next_player_index={next_player_index}, player_objs length={len(player_objs)}")
-        print(f"DEBUG: Player objects: {[p.user_id for p in player_objs]}")
-
-        if next_player_index is not None and 0 <= next_player_index < len(player_objs):
-            next_player_id = player_objs[next_player_index].user_id
-            print(f"DEBUG: Successfully got next_player_id: {next_player_id}")
-        else:
-            print(f"WARNING: Invalid next_player_index: {next_player_index}")
-            # If the index is invalid, try to find the next active player
-            for i, player in enumerate(player_objs):
-                print(f"DEBUG: Checking player {i}: {player.user_id}, stack: {player.stack}")
-                if player.stack > 0:  # Find first player with chips
-                    next_player_id = player.user_id
-                    print(f"DEBUG: Found active player: {next_player_id}")
-                    break
-            else:
-                print(f"WARNING: No active players found!")
-                next_player_id = None
-
-        # Calculate total pot amount
-        total_pot = sum(contribution["amount"] for contribution in pot_contributions)
-
-        # Generate valid actions with correct amounts
-        raw_actions = emulator.generate_possible_actions(game_state)
-        valid_actions = []
-
-        for action in raw_actions:
-            if action["action"] == "fold":
-                # Fold always costs 0
-                valid_actions.append({"action": "fold", "amount": 0})
-            elif action["action"] == "call":
-                # Calculate the actual amount the player needs to put in from their stack
-                player_contribution = next((cont["amount"] for cont in pot_contributions if cont["user_id"] == next_player_id), 0)
-                call_amount = current_bet - player_contribution
-                if call_amount == 0:
-                    # No more money needed = check
-                    valid_actions.append({"action": "check", "amount": 0})
-                else:
-                    # More money needed = call
-                    valid_actions.append({"action": "call", "amount": call_amount})
-            elif action["action"] == "raise":
-                # Keep the raise action as is (frontend needs to specify amount)
-                valid_actions.append(action)
-
-        print(f"DEBUG: Generated valid actions: {valid_actions}")
-
-        return {
-            "next_player": next_player_id,
-            "valid_actions": valid_actions,
-            "board": [str(card) for card in table.get_community_card()],
-            "pot": pot_contributions,
-            "total_pot": total_pot,
-            "street": game_state.get("street"),
-            "round_count": game_state.get("round_count")
-        }
+        round_state = self._get_current_round_state(dealer, table, current_state)
+        return round_state
 
     def end_game(self, game_id):
         if game_id in self.games:

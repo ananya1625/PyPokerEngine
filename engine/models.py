@@ -6,6 +6,7 @@ class SetupPlayer(BasePokerPlayer):
         self.stack = stack
         self.hole_card = None
         self.position = None
+        self.has_folded = False  # Track if this player has folded
 
     def declare_action(self, valid_actions, hole_card, round_state):
         return "fold", 0
@@ -24,3 +25,11 @@ class SetupPlayer(BasePokerPlayer):
 
     def receive_round_result_message(self, winners, hand_info, round_state):
         pass
+
+    def mark_folded(self):
+        """Mark this player as having folded"""
+        self.has_folded = True
+
+    def is_active(self):
+        """Check if this player is still active (hasn't folded)"""
+        return not self.has_folded
