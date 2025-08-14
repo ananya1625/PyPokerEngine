@@ -244,15 +244,19 @@ class GameEngineService:
 
             # Update game state
             game["current_state"] = current_state
+            print(f"DEBUG: Updated game state - next_player: {current_state['next_player']}")
 
             # Update round state
             round_state = self._get_current_round_state(dealer, table, current_state)
 
+            # Use the updated next_player from current_state, not the old next_player_pos
+            final_next_player = current_state["next_player"]
+            print(f"DEBUG: Returning result - next_player: {final_next_player}, current_state next_player: {current_state['next_player']}")
             return {
                 "success": True,
                 "round_state": round_state,
                 "action_applied": action,
-                "next_player": next_player_pos,
+                "next_player": final_next_player,
                 "street_complete": street_complete,
                 "street_advanced": street_advanced,
                 "current_street": current_state["street"]
@@ -299,6 +303,7 @@ class GameEngineService:
                 current_state["street"] = Const.Street.FLOP
                 current_state["next_player"] = (table.dealer_btn + 1) % 2  # Big blind acts first postflop
                 current_state["players_acted"] = set()  # Reset for new street
+                print(f"DEBUG: Advanced to FLOP, dealer_btn: {table.dealer_btn}, next_player: {current_state['next_player']}, player name: {table.seats.players[current_state['next_player']].name}")
 
             elif current_street == Const.Street.FLOP:
                 # Deal turn (1 community card)

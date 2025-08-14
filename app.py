@@ -165,6 +165,8 @@ def action():
             next_player_pos = result.get("next_player", 0)
             next_player = table.seats.players[next_player_pos]
             transformed_response["next_player"] = next_player.name
+            print(f"DEBUG: Action response - next_player_pos: {next_player_pos}, next_player.name: {next_player.name}")
+            print(f"DEBUG: Table player order - Player 0: {table.seats.players[0].name}, Player 1: {table.seats.players[1].name}")
 
             # Extract board (community cards)
             community_cards = round_state.get("community_cards", [])
@@ -255,6 +257,9 @@ def action():
         # Transform community cards to string format
         community_cards = [str(card) for card in round_state.get("community_cards", [])]
 
+        # Move players to top level
+        transformed_response["players"] = transformed_players
+
         transformed_response["round_state"] = {
             "dealer_btn": round_state.get("dealer_btn", 0),
             "sb_pos": round_state.get("sb_pos", 0),
@@ -262,8 +267,7 @@ def action():
             "community_cards": community_cards,
             "pot": round_state.get("pot", 0),
             "street": round_state.get("street", 0),
-            "next_player": round_state.get("next_player", 0),
-            "players": transformed_players
+            "next_player": round_state.get("next_player", 0)
         }
 
     return jsonify(transformed_response)
@@ -290,7 +294,7 @@ def get_state(game_id):
         "community_cards": [],
         "pot": [],  # Will be calculated from player.pay_info.amount
         "street": result.get("street", 0),
-        "next_player": result.get("next_player", 0),
+        "next_player": "",  # Will be transformed from index to player name
         "players": []
     }
 
@@ -311,6 +315,14 @@ def get_state(game_id):
             "position": player.get("position", "none")
         })
 
+    # Transform next_player from index to player name
+    next_player_pos = result.get("next_player", 0)
+    if 0 <= next_player_pos < len(table.seats.players):
+        next_player = table.seats.players[next_player_pos]
+        transformed_response["next_player"] = next_player.name
+    else:
+        transformed_response["next_player"] = ""
+
     # Calculate pot from player.pay_info.amount (matching /start-game format)
     for i, player in enumerate(table.seats.players):
         pot_amount = player.pay_info.amount if hasattr(player, 'pay_info') else 0
@@ -330,4 +342,4 @@ def end_game(game_id):
     return jsonify(result)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3001)
+    app.run(host="0.0.0.0", port=3000)
