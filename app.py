@@ -28,11 +28,13 @@ def start_game():
     transformed_response = {
         "game_id": result["game_id"],
         "min_bet": 0,  # Will be calculated based on call amount
-        "next_player": result["round_state"]["players"][result["round_state"]["next_player"]]["name"],
+        "next_player": None,  # Will be set below
         "players": [],
         "pot": [],
         "total_pot": 3,  # Small blind (1) + Big blind (2)
-        "valid_actions": []
+        "valid_actions": [],
+        "is_hand_over": False,
+        "winning_hand": None
     }
 
     # Transform players data using PyPokerEngine's built-in methods
@@ -62,6 +64,13 @@ def start_game():
 
     # Calculate total pot from individual contributions
     transformed_response["total_pot"] = sum(p["amount"] for p in transformed_response["pot"])
+
+    # Set next_player from the round state
+    next_player_pos = result["round_state"]["next_player"]
+    if next_player_pos is not None and 0 <= next_player_pos < len(result["round_state"]["players"]):
+        transformed_response["next_player"] = result["round_state"]["players"][next_player_pos]["name"]
+    else:
+        transformed_response["next_player"] = None
 
         # Generate valid actions using our corrected calculation
     next_player_pos = current_state["next_player"]
@@ -108,17 +117,29 @@ def start_game():
 
 
 
-    # Calculate raise amounts
-    min_raise = max_bet + 1  # Must raise at least 1 more than current bet
+    # Calculate raise amounts using PyPokerEngine's logic
+    from pypokerengine.engine.action_checker import ActionChecker
+
+    # Debug: print action histories to understand what's happening
+    print(f"DEBUG: Action histories for min raise calculation (start-game):")
+    for i, p in enumerate(table.seats.players):
+        print(f"  Player {i} ({p.name}): {p.action_histories}")
+
+    min_raise = ActionChecker._ActionChecker__min_raise_amount(table.seats.players, 1)  # 1 is small blind amount
+    print(f"DEBUG: PyPokerEngine min_raise (start-game): {min_raise}")
+
     max_raise = next_player.stack
 
         # Add valid actions
     transformed_response["valid_actions"].append({"action": "fold", "amount": 0})
     transformed_response["valid_actions"].append({"action": "call", "amount": call_amount})
-    transformed_response["valid_actions"].append({
-        "action": "raise",
-        "amount": {"max": max_raise, "min": min_raise}
-    })
+
+    # Only show raise if the player has enough chips to raise more than the call amount
+    if max_raise > call_amount:
+        transformed_response["valid_actions"].append({
+            "action": "raise",
+            "amount": {"max": max_raise, "min": min_raise}
+        })
 
     # Set min_bet to match the call amount
     transformed_response["min_bet"] = call_amount
@@ -143,12 +164,15 @@ def action():
 
     # Start with the internal response fields
     transformed_response = {
+        "game_id": game_id,
         "success": result.get("success", True),
         "action_applied": result.get("action_applied", action),
         "next_player": result.get("next_player", 0),
         "should_advance_street": result.get("should_advance_street", False),
         "current_street": result.get("current_street", 0),
-        "round_state": {}  # We'll transform this below
+        "round_state": {},  # We'll transform this below
+        "is_hand_over": False,
+        "winning_hand": None
     }
 
     # Add client-facing fields
@@ -163,10 +187,13 @@ def action():
 
             # Transform next_player from index to player name
             next_player_pos = result.get("next_player", 0)
-            next_player = table.seats.players[next_player_pos]
-            transformed_response["next_player"] = next_player.name
-            print(f"DEBUG: Action response - next_player_pos: {next_player_pos}, next_player.name: {next_player.name}")
-            print(f"DEBUG: Table player order - Player 0: {table.seats.players[0].name}, Player 1: {table.seats.players[1].name}")
+            if next_player_pos is None:
+                transformed_response["next_player"] = None
+            else:
+                next_player = table.seats.players[next_player_pos]
+                transformed_response["next_player"] = next_player.name
+                print(f"DEBUG: Action response - next_player_pos: {next_player_pos}, next_player.name: {next_player.name}")
+                print(f"DEBUG: Table player order - Player 0: {table.seats.players[0].name}, Player 1: {table.seats.players[1].name}")
 
             # Extract board (community cards)
             community_cards = round_state.get("community_cards", [])
@@ -189,52 +216,65 @@ def action():
             transformed_response["street"] = round_state.get("street", 0)
 
             # Generate valid actions for the next player
-            active_players = [p for p in table.seats.players if p.is_active()]
-            max_bet = max(p.pay_info.amount for p in active_players) if active_players else 0
+            # Check if we're at showdown (no valid actions)
+            if current_state.get("street") == 4:  # SHOWDOWN
+                transformed_response["valid_actions"] = []
+            else:
+                active_players = [p for p in table.seats.players if p.is_active()]
+                max_bet = max(p.pay_info.amount for p in active_players) if active_players else 0
 
-            # Calculate call amount for the next player
-            if len(table.seats.players) == 2:
-                # Find small blind and big blind players
-                small_blind_player = None
-                big_blind_player = None
-                for p in table.seats.players:
-                    if p.position == "small_blind":
-                        small_blind_player = p
-                    elif p.position == "big_blind":
-                        big_blind_player = p
-
-                if small_blind_player and big_blind_player:
-                    # Calculate what small blind needs to call (big blind amount - small blind amount)
-                    call_amount = big_blind_player.pay_info.amount - small_blind_player.pay_info.amount
+                # Calculate call amount for the next player (who is about to act)
+                if next_player is not None:
+                    player_contribution = next_player.pay_info.amount
+                    call_amount = max(0, max_bet - player_contribution)
+                    print(f"DEBUG: Valid actions - next_player: {next_player.name}, max_bet: {max_bet}, player_contribution: {player_contribution}, call_amount: {call_amount}")
                 else:
                     call_amount = 0
-            else:
-                # For more than 2 players, use the old logic
-                player_contribution = next_player.pay_info.amount
-                call_amount = max(0, max_bet - player_contribution)
 
-            call_amount = max(0, call_amount)  # Can't call negative amounts
+                call_amount = max(0, call_amount)  # Can't call negative amounts
 
-            # Calculate raise amounts
-            min_raise = max_bet + 1  # Must raise at least 1 more than current bet
-            max_raise = next_player.stack
+                                # Calculate raise amounts using PyPokerEngine's logic
+                from pypokerengine.engine.action_checker import ActionChecker
 
-            # Add valid actions
-            valid_actions = []
-            valid_actions.append({"action": "fold", "amount": 0})
+                # Debug: print action histories to understand what's happening
+                print(f"DEBUG: Action histories for min raise calculation:")
+                for i, p in enumerate(table.seats.players):
+                    print(f"  Player {i} ({p.name}): {p.action_histories}")
 
-            # If call amount is 0, it's a check, otherwise it's a call
-            if call_amount == 0:
-                valid_actions.append({"action": "check", "amount": 0})
-            else:
-                valid_actions.append({"action": "call", "amount": call_amount})
+                min_raise = ActionChecker._ActionChecker__min_raise_amount(table.seats.players, 1)  # 1 is small blind amount
+                print(f"DEBUG: PyPokerEngine min_raise: {min_raise}")
 
-            valid_actions.append({
-                "action": "raise",
-                "amount": {"max": max_raise, "min": min_raise}
-            })
+                max_raise = next_player.stack if next_player is not None else 0
 
-            transformed_response["valid_actions"] = valid_actions
+                # Add valid actions
+                valid_actions = []
+                valid_actions.append({"action": "fold", "amount": 0})
+
+                # If call amount is 0, it's a check, otherwise it's a call
+                if call_amount == 0:
+                    valid_actions.append({"action": "check", "amount": 0})
+                    print(f"DEBUG: Added check action (call_amount: {call_amount})")
+                else:
+                    valid_actions.append({"action": "call", "amount": call_amount})
+                    print(f"DEBUG: Added call action (call_amount: {call_amount})")
+
+                # Only show raise if the player has enough chips to raise more than the call amount
+                if max_raise > call_amount:
+                    valid_actions.append({
+                        "action": "raise",
+                        "amount": {"max": max_raise, "min": min_raise}
+                    })
+
+                transformed_response["valid_actions"] = valid_actions
+                print(f"DEBUG: Final valid_actions: {valid_actions}")
+
+    # Check if hand is over (showdown)
+    winning_hand = engine.get_winning_hand(game_id)
+    if winning_hand:
+        transformed_response["is_hand_over"] = True
+        transformed_response["winning_hand"] = winning_hand
+        # During showdown, there are no valid actions
+        transformed_response["valid_actions"] = []
 
     # Transform round_state to handle Card objects
     if "round_state" in result:
@@ -247,7 +287,7 @@ def action():
             hole_cards = [str(card) for card in player.get("hole_cards", [])]
 
             transformed_players.append({
-                "name": player.get("name", ""),
+                "user_id": player.get("name", ""),  # Use user_id instead of name
                 "stack": player.get("stack", 0),
                 "hole_cards": hole_cards,
                 "is_active": player.get("is_active", True),
@@ -288,6 +328,7 @@ def get_state(game_id):
 
     # Transform the response to handle Card objects
     transformed_response = {
+        "game_id": game_id,
         "dealer_btn": result.get("dealer_btn", 0),
         "sb_pos": result.get("sb_pos", 0),
         "bb_pos": result.get("bb_pos", 0),
@@ -295,7 +336,9 @@ def get_state(game_id):
         "pot": [],  # Will be calculated from player.pay_info.amount
         "street": result.get("street", 0),
         "next_player": "",  # Will be transformed from index to player name
-        "players": []
+        "players": [],
+        "is_hand_over": False,
+        "winning_hand": None
     }
 
     # Transform community cards to string format
@@ -308,7 +351,7 @@ def get_state(game_id):
         hole_cards = [str(card) for card in player.get("hole_cards", [])]
 
         transformed_response["players"].append({
-            "name": player.get("name", ""),
+            "user_id": player.get("name", ""),  # Use user_id instead of name
             "stack": player.get("stack", 0),
             "hole_cards": hole_cards,
             "is_active": player.get("is_active", True),
@@ -317,7 +360,9 @@ def get_state(game_id):
 
     # Transform next_player from index to player name
     next_player_pos = result.get("next_player", 0)
-    if 0 <= next_player_pos < len(table.seats.players):
+    if next_player_pos is None:
+        transformed_response["next_player"] = None
+    elif 0 <= next_player_pos < len(table.seats.players):
         next_player = table.seats.players[next_player_pos]
         transformed_response["next_player"] = next_player.name
     else:
@@ -330,6 +375,12 @@ def get_state(game_id):
             "amount": pot_amount,
             "user_id": player.name
         })
+
+    # Check if hand is over (showdown)
+    winning_hand = engine.get_winning_hand(game_id)
+    if winning_hand:
+        transformed_response["is_hand_over"] = True
+        transformed_response["winning_hand"] = winning_hand
 
     # Calculate total pot
     transformed_response["total_pot"] = sum(p["amount"] for p in transformed_response["pot"])
