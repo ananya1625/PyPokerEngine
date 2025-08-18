@@ -1,0 +1,108 @@
+# 3-Player Poker Game Test Commands
+
+# 1. Start a new 3-player game
+curl -X POST http://localhost:3000/start-game \
+  -H "Content-Type: application/json" \
+  -d '{
+    "game_id": "test_game_3p",
+    "players": [
+      {"user_id": "player1", "stack": 1000},
+      {"user_id": "player2", "stack": 1000},
+      {"user_id": "player3", "stack": 1000}
+    ]
+  }'
+
+# 2. Check initial game state
+curl -X GET http://localhost:3000/state/test_game_3p
+
+# 3. Player 1 calls (small blind)
+curl -X POST http://localhost:3000/action \
+  -H "Content-Type: application/json" \
+  -d '{
+    "game_id": "test_game_3p",
+    "user_id": "player1",
+    "action": "call",
+    "amount": 0
+  }'
+
+# 4. Check game state after player 1 action
+curl -X GET http://localhost:3000/state/test_game_3p
+
+# 5. Player 2 calls (big blind)
+curl -X POST http://localhost:3000/action \
+  -H "Content-Type: application/json" \
+  -d '{
+    "game_id": "test_game_3p",
+    "user_id": "player2",
+    "action": "call",
+    "amount": 0
+  }'
+
+# 6. Check game state after player 2 action
+curl -X GET http://localhost:3000/state/test_game_3p
+
+# 7. Player 3 calls
+curl -X POST http://localhost:3000/action \
+  -H "Content-Type: application/json" \
+  -d '{
+    "game_id": "test_game_3p",
+    "user_id": "player3",
+    "action": "call",
+    "amount": 0
+  }'
+
+# 8. Check game state after flop (should auto-advance)
+curl -X GET http://localhost:3000/state/test_game_3p
+
+# 9. Player 1 checks on flop
+curl -X POST http://localhost:3000/action \
+  -H "Content-Type: application/json" \
+  -d '{
+    "game_id": "test_game_3p",
+    "user_id": "player1",
+    "action": "check",
+    "amount": 0
+  }'
+
+# 10. Player 2 bets 50 on flop
+curl -X POST http://localhost:3000/action \
+  -H "Content-Type: application/json" \
+  -d '{
+    "game_id": "test_game_3p",
+    "user_id": "player2",
+    "action": "raise",
+    "amount": 50
+  }'
+
+# 11. Player 3 folds
+curl -X POST http://localhost:3000/action \
+  -H "Content-Type: application/json" \
+  -d '{
+    "game_id": "test_game_3p",
+    "user_id": "player3",
+    "action": "fold",
+    "amount": 0
+  }'
+
+# 12. Player 1 calls the 50 bet
+curl -X POST http://localhost:3000/action \
+  -H "Content-Type: application/json" \
+  -d '{
+    "game_id": "test_game_3p",
+    "user_id": "player1",
+    "action": "call",
+    "amount": 0
+  }'
+
+# 13. Check game state after turn (should auto-advance)
+curl -X GET http://localhost:3000/state/test_game_3p
+
+# 14. Continue playing through the hand...
+# Add more actions as needed
+
+# 15. End the game when finished
+curl -X POST http://localhost:3000/end_game \
+  -H "Content-Type: application/json" \
+  -d '{
+    "game_id": "test_game_3p"
+  }'

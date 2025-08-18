@@ -49,62 +49,21 @@ class GameEngineService:
                 hole_cards = table.deck.draw_cards(2)
                 player.add_holecard(hole_cards)
 
-            # Collect blinds - use dealer_index directly for consistency
-            small_blind_player = table.seats.players[dealer_index]  # Dealer is small blind
-            big_blind_player = table.seats.players[(dealer_index + 1) % 2]  # Other player is big blind
-
-            # Small blind
-            sb_amount = 1
-            small_blind_player.collect_bet(sb_amount)
-            small_blind_player.add_action_history(Const.Action.SMALL_BLIND, sb_amount=sb_amount)
-            small_blind_player.pay_info.update_by_pay(sb_amount)
-            print(f"DEBUG: Small blind collected {sb_amount}, pay_info.amount now: {small_blind_player.pay_info.amount}")
-
-            # Big blind
-            bb_amount = sb_amount * 2
-            big_blind_player.collect_bet(bb_amount)
-            big_blind_player.add_action_history(Const.Action.BIG_BLIND, sb_amount=sb_amount)  # Pass small blind amount, not big blind amount
-            big_blind_player.pay_info.update_by_pay(bb_amount)
-            print(f"DEBUG: Big blind collected {bb_amount}, pay_info.amount now: {big_blind_player.pay_info.amount}")
+            # Collect blinds based on player count
+            self._collect_blinds(table, dealer_index)
 
         except Exception as e:
             return {"error": f"Failed to deal cards and collect blinds: {str(e)}"}
 
-                        # Assign positions based on dealer button
-        # dealer_index is already defined above in the blind collection section
-
-        # Update player positions - we'll handle this in the heads-up logic below
-        # for i, player in enumerate(table.seats.players):
-        #     if i == dealer_index:
-        #         player.position = "dealer"
-        #     elif i == sb_pos:
-        #         player.position = "small_blind"
-        #     elif i == bb_pos:
-        #         player.position = "big_blind"
-        #     else:
-        #         player.position = "none"
-
-        # In heads-up play, dealer is also small blind
-        if len(table.seats.players) == 2:
-            # Clear all positions first
-            for player in table.seats.players:
-                player.position = "none"
-
-            # Assign correct positions for heads-up (0 and 1, not 1 and 2)
-            table.seats.players[dealer_index].position = "small_blind"
-            table.seats.players[(dealer_index + 1) % 2].position = "big_blind"
-
-            # Debug final state
-            print(f"DEBUG: Final positions and amounts:")
-            for i, p in enumerate(table.seats.players):
-                print(f"  Player {i}: position={p.position}, pay_info.amount={p.pay_info.amount}, stack={p.stack}")
+        # Assign positions based on player count
+        self._assign_positions(table, dealer_index)
 
         # Create a simple game state
         current_state = {
             "round_count": 1,
             "small_blind_amount": 1,
             "street": Const.Street.PREFLOP,
-            "next_player": dealer_index,  # In heads-up preflop, small blind (dealer) acts first
+            "next_player": self._get_first_actor(dealer_index, len(table.seats.players)),  # Dynamic first actor
             "players_acted": set(),  # Track which players have acted this street
             "table": table
         }
@@ -140,10 +99,20 @@ class GameEngineService:
         if state is None:
             state = {}
 
+        # Calculate blind positions dynamically
+        if len(table.seats.players) == 2:
+            # Heads-up: dealer is small blind
+            sb_pos = table.dealer_btn
+            bb_pos = (table.dealer_btn + 1) % 2
+        else:
+            # 3+ players: dealer has no blind
+            sb_pos = (table.dealer_btn + 1) % len(table.seats.players)
+            bb_pos = (table.dealer_btn + 2) % len(table.seats.players)
+
         return {
             "dealer_btn": table.dealer_btn,
-            "sb_pos": 0,  # Hardcoded for heads-up - dealer is small blind
-            "bb_pos": 1,  # Hardcoded for heads-up - other player is big blind
+            "sb_pos": sb_pos,
+            "bb_pos": bb_pos,
             "community_cards": table.get_community_card(),
             "pot": self._calculate_pot(table),
             "street": state.get("street", 0),
@@ -399,8 +368,8 @@ class GameEngineService:
                     card = table.deck.draw_card()
                     table.add_community_card(card)
                 current_state["street"] = Const.Street.FLOP
-                # Postflop: Big blind acts first in heads-up
-                current_state["next_player"] = (table.dealer_btn + 1) % 2  # Big blind acts first postflop
+                # Postflop: Dealer acts first (both heads-up and multi-player)
+                current_state["next_player"] = table.dealer_btn
                 current_state["players_acted"] = set()  # Reset for new street
                 print(f"DEBUG: Advanced to FLOP, dealer_btn: {table.dealer_btn}, next_player: {current_state['next_player']}, player name: {table.seats.players[current_state['next_player']].name}")
 
@@ -409,8 +378,8 @@ class GameEngineService:
                 card = table.deck.draw_card()
                 table.add_community_card(card)
                 current_state["street"] = Const.Street.TURN
-                # Postflop: Big blind acts first in heads-up
-                current_state["next_player"] = (table.dealer_btn + 1) % 2  # Big blind acts first postflop
+                # Postflop: Dealer acts first (both heads-up and multi-player)
+                current_state["next_player"] = table.dealer_btn
                 current_state["players_acted"] = set()  # Reset for new street
                 print(f"DEBUG: Advanced to TURN, dealer_btn: {table.dealer_btn}, next_player: {current_state['next_player']}, player name: {table.seats.players[current_state['next_player']].name}")
 
@@ -419,8 +388,8 @@ class GameEngineService:
                 card = table.deck.draw_card()
                 table.add_community_card(card)
                 current_state["street"] = Const.Street.RIVER
-                # Postflop: Big blind acts first in heads-up
-                current_state["next_player"] = (table.dealer_btn + 1) % 2  # Big blind acts first postflop
+                # Postflop: Dealer acts first (both heads-up and multi-player)
+                current_state["next_player"] = table.dealer_btn
                 current_state["players_acted"] = set()  # Reset for new street
                 print(f"DEBUG: Advanced to RIVER, dealer_btn: {table.dealer_btn}, next_player: {current_state['next_player']}, player name: {table.seats.players[current_state['next_player']].name}")
 
@@ -452,7 +421,89 @@ class GameEngineService:
             print(f"Error advancing street: {e}")
             return False
 
+    def _collect_blinds(self, table, dealer_index):
+        """Collect blinds based on player count and dealer position."""
+        if len(table.seats.players) == 2:
+            # Heads-up: Dealer is small blind, other player is big blind
+            small_blind_player = table.seats.players[dealer_index]
+            big_blind_player = table.seats.players[(dealer_index + 1) % 2]
 
+            # Small blind
+            sb_amount = 1
+            small_blind_player.collect_bet(sb_amount)
+            small_blind_player.add_action_history(Const.Action.SMALL_BLIND, sb_amount=sb_amount)
+            small_blind_player.pay_info.update_by_pay(sb_amount)
+            print(f"DEBUG: Small blind collected {sb_amount}, pay_info.amount now: {small_blind_player.pay_info.amount}")
+
+            # Big blind
+            bb_amount = sb_amount * 2
+            big_blind_player.collect_bet(bb_amount)
+            big_blind_player.add_action_history(Const.Action.BIG_BLIND, sb_amount=sb_amount)
+            big_blind_player.pay_info.update_by_pay(bb_amount)
+            print(f"DEBUG: Big blind collected {bb_amount}, pay_info.amount now: {big_blind_player.pay_info.amount}")
+        else:
+            # 3+ players: Dealer has no blind, separate small blind and big blind
+            small_blind_player = table.seats.players[(dealer_index + 1) % len(table.seats.players)]
+            big_blind_player = table.seats.players[(dealer_index + 2) % len(table.seats.players)]
+
+            # Small blind
+            sb_amount = 1
+            small_blind_player.collect_bet(sb_amount)
+            small_blind_player.add_action_history(Const.Action.SMALL_BLIND, sb_amount=sb_amount)
+            small_blind_player.pay_info.update_by_pay(sb_amount)
+            print(f"DEBUG: Small blind collected {sb_amount}, pay_info.amount now: {small_blind_player.pay_info.amount}")
+
+            # Big blind
+            bb_amount = sb_amount * 2
+            big_blind_player.collect_bet(bb_amount)
+            big_blind_player.add_action_history(Const.Action.BIG_BLIND, sb_amount=sb_amount)
+            big_blind_player.pay_info.update_by_pay(bb_amount)
+            print(f"DEBUG: Big blind collected {bb_amount}, pay_info.amount now: {big_blind_player.pay_info.amount}")
+
+    def _assign_positions(self, table, dealer_index):
+        """Assign positions to players based on player count and dealer position."""
+        if len(table.seats.players) == 2:
+            # Heads-up: Dealer is small blind, other player is big blind
+            for player in table.seats.players:
+                player.position = "none"
+
+            table.seats.players[dealer_index].position = "small_blind"
+            table.seats.players[(dealer_index + 1) % 2].position = "big_blind"
+
+            print(f"DEBUG: Final positions and amounts (Heads-up):")
+            for i, p in enumerate(table.seats.players):
+                print(f"  Player {i}: position={p.position}, pay_info.amount={p.pay_info.amount}, stack={p.stack}")
+        else:
+            # 3+ players: Dealer, small blind, big blind, and other positions
+            for player in table.seats.players:
+                player.position = "none"
+
+            # Assign dealer position
+            table.seats.players[dealer_index].position = "dealer"
+
+            # Assign small blind position
+            sb_pos = (dealer_index + 1) % len(table.seats.players)
+            table.seats.players[sb_pos].position = "small_blind"
+
+            # Assign big blind position
+            bb_pos = (dealer_index + 2) % len(table.seats.players)
+            table.seats.players[bb_pos].position = "big_blind"
+
+            # Assign other positions (UTG, MP, CO, etc.)
+            for i in range(len(table.seats.players)):
+                if i not in [dealer_index, sb_pos, bb_pos]:
+                    if i == (dealer_index + 3) % len(table.seats.players):
+                        table.seats.players[i].position = "UTG"  # Under the gun
+                    elif i == (dealer_index + 4) % len(table.seats.players):
+                        table.seats.players[i].position = "MP"   # Middle position
+                    elif i == (dealer_index + 5) % len(table.seats.players):
+                        table.seats.players[i].position = "CO"   # Cutoff
+                    else:
+                        table.seats.players[i].position = "MP"   # Default to middle position
+
+            print(f"DEBUG: Final positions and amounts (Multi-player):")
+            for i, p in enumerate(table.seats.players):
+                print(f"  Player {i}: position={p.position}, pay_info.amount={p.pay_info.amount}, stack={p.stack}")
 
     def _calculate_call_amount(self, table, player):
         """Calculate how much the player needs to call"""
@@ -487,6 +538,16 @@ class GameEngineService:
             next_pos = (next_pos + 1) % len(players)
 
         return current_pos  # If no one else is active
+
+    def _get_first_actor(self, dealer_btn, player_count):
+        """Get the first player to act based on player count and street"""
+        if player_count == 2:
+            # Heads-up: Small blind (dealer) acts first preflop
+            return dealer_btn
+        else:
+            # 3+ players: UTG (under the gun) acts first preflop
+            # UTG is the player to the left of the big blind
+            return (dealer_btn + 3) % player_count
 
 
 
