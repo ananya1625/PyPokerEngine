@@ -549,6 +549,13 @@ class GameEngineService:
             # UTG is the player to the left of the big blind
             return (dealer_btn + 3) % player_count
 
+    def _fix_poker_hand_names(self, hand_rank):
+        """Fix incorrect poker hand names from PyPokerEngine library"""
+        hand_name_mapping = {
+            "FLASH": "FLUSH",
+            "STRAIGHTFLASH": "STRAIGHT_FLUSH"
+        }
+        return hand_name_mapping.get(hand_rank, hand_rank)
 
 
     def get_state(self, game_id):
@@ -617,9 +624,12 @@ class GameEngineService:
         print(f"DEBUG: Hand rank: {hand_rank}")
         print(f"DEBUG: Winner: {winner.name}")
 
+        # Fix incorrect poker hand names from the library
+        corrected_hand_rank = self._fix_poker_hand_names(hand_rank)
+
         return {
             "cards": [str(card) for card in best_cards],
-            "rank": hand_rank,
+            "rank": corrected_hand_rank,
             "user_id": winner.name
         }
 
@@ -627,13 +637,23 @@ class GameEngineService:
         """Find the exact 5 cards that make up the winning hand"""
         all_cards = hole_cards + community_cards
 
-        if hand_rank == "STRAIGHTFLUSH":
+        # Use the hand evaluator to find the actual best 5 cards
+        from pypokerengine.engine.hand_evaluator import HandEvaluator
+
+        # Get the best 5-card hand by evaluating all possible combinations
+        best_hand = self._evaluate_best_5_cards(all_cards)
+
+        if best_hand:
+            return best_hand
+
+        # Fallback: if the above doesn't work, use the original logic
+        if hand_rank in ["STRAIGHTFLUSH", "STRAIGHT_FLUSH"]:
             return self._find_straight_flush_cards(all_cards)
         elif hand_rank == "FOURCARD":
             return self._find_four_card_cards(all_cards)
         elif hand_rank == "FULLHOUSE":
             return self._find_full_house_cards(all_cards)
-        elif hand_rank == "FLUSH":
+        elif hand_rank in ["FLASH", "FLUSH"]:
             return self._find_flush_cards(all_cards)
         elif hand_rank == "STRAIGHT":
             return self._find_straight_cards(all_cards)
@@ -645,6 +665,42 @@ class GameEngineService:
             return self._find_one_pair_cards(all_cards)
         else:  # HIGH_CARD
             return self._find_high_card_cards(all_cards)
+
+    def _evaluate_best_5_cards(self, all_cards):
+        """Evaluate all possible 5-card combinations and find the best one"""
+        from itertools import combinations
+        from pypokerengine.engine.hand_evaluator import HandEvaluator
+
+        print(f"DEBUG: Evaluating {len(all_cards)} cards: {[str(card) for card in all_cards]}")
+
+        best_hand = None
+        best_score = -1
+
+        # Try all possible 5-card combinations
+        for five_cards in combinations(all_cards, 5):
+            # Evaluate this 5-card hand
+            hand_info = HandEvaluator.gen_hand_rank_info(list(five_cards), [])
+            score = hand_info["hand"]["strength"]
+
+            print(f"DEBUG: 5-card hand {[str(card) for card in five_cards]} -> {score}")
+
+            # Convert hand strength to numeric score for comparison
+            strength_order = {
+                "HIGH_CARD": 1, "ONEPAIR": 2, "TWOPAIR": 3, "THREECARD": 4,
+                "STRAIGHT": 5, "FLASH": 6, "FLUSH": 6, "FULLHOUSE": 7, "FOURCARD": 8,
+                "STRAIGHTFLASH": 9, "STRAIGHTFLUSH": 9
+            }
+
+            numeric_score = strength_order.get(score, 0)
+
+            # If this hand is better, update best
+            if numeric_score > best_score:
+                best_score = numeric_score
+                best_hand = list(five_cards)
+                print(f"DEBUG: New best hand: {[str(card) for card in best_hand]} with score {numeric_score}")
+
+        print(f"DEBUG: Final best hand: {[str(card) for card in best_hand] if best_hand else 'None'}")
+        return best_hand
 
     def _find_straight_flush_cards(self, cards):
         """Find the 5 cards that make a straight flush"""
